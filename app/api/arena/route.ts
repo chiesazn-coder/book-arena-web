@@ -1,99 +1,129 @@
+// app/api/arena/route.ts
 import Papa from "papaparse";
 import type { ParseResult } from "papaparse";
 
 export const dynamic = "force-dynamic";
 
-type Row = {
-  Timestamp?: string;
-  Nama?: string;
-  "Judul Buku yang Sedang Dibaca"?: string;
-  "Progres Terakhir (Angka Halaman)"?: string;
-  "Status Buku"?: string;
-  "Total Halaman Buku"?: string;
-  Week_ID?: string;
+/**
+ * CSV dari tab ARENA_WEEKLY (GA)
+ * Kolom yang diharapkan:
+ * employee_name, submitted, pages_added, finish_bonus, streak_bonus,
+ * weekly_score, rank, books_finished_week, finished_total
+ */
+type ArenaWeeklyRow = {
+  employee_name?: string;
+  submitted?: string; // TRUE/FALSE (kadang kebaca string)
+  pages_added?: string;
+  finish_bonus?: string;
+  streak_bonus?: string;
+  weekly_score?: string;
+  rank?: string;
+
+  books_finished_week?: string;
+  finished_total?: string;
 };
 
 type EmployeeRow = {
   employee_name?: string;
-  active?: string; // TRUE/FALSE (bisa kebaca string)
+  active?: string; // TRUE/FALSE, bisa kebaca string
 };
 
 function toInt(x: unknown): number {
-  const n = Number(String(x ?? "").trim());
+  const s = String(x ?? "")
+    .trim()
+    .replace(",", ".")
+    .replace(/[^\d.\-]/g, ""); // buang simbol lain
+  const n = Number(s);
   return Number.isFinite(n) ? Math.floor(n) : 0;
 }
 
 function isTrueLike(v: unknown): boolean {
   const s = String(v ?? "").trim().toLowerCase();
-  return s === "true" || s === "1" || s === "yes";
+  return s === "true" || s === "1" || s === "yes" || s === "y" || s === "iya";
 }
 
 async function fetchCsv<T>(url: string): Promise<T[]> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch CSV: ${url}`);
   const text = await res.text();
-  const parsed: ParseResult<T> = Papa.parse<T>(text, { header: true, skipEmptyLines: true });
+
+  const parsed: ParseResult<T> = Papa.parse<T>(text, {
+    header: true,
+    skipEmptyLines: true,
+  });
+
   return (parsed.data ?? []).filter(Boolean);
 }
 
 export async function GET(req: Request) {
-  const responsesUrl = process.env.SHEET_CSV_URL;
+  const responsesUrl = process.env.SHEET_CSV_URL; // <-- ARENA_WEEKLY CSV
   const employeesUrl = process.env.EMPLOYEES_CSV_URL;
 
-  if (!responsesUrl) return Response.json({ error: "SHEET_CSV_URL not set" }, { status: 500 });
-  if (!employeesUrl) return Response.json({ error: "EMPLOYEES_CSV_URL not set" }, { status: 500 });
+  if (!responsesUrl) {
+    return Response.json({ error: "SHEET_CSV_URL not set" }, { status: 500 });
+  }
+  if (!employeesUrl) {
+    return Response.json({ error: "EMPLOYEES_CSV_URL not set" }, { status: 500 });
+  }
 
   const { searchParams } = new URL(req.url);
-  const week = searchParams.get("week") || "";
+  const weekParam = (searchParams.get("week") || "").trim();
+  const effectiveWeek = weekParam || "CURRENT";
 
-  const rows = (await fetchCsv<Row>(responsesUrl)).filter((r) => Boolean(r.Nama && String(r.Nama).trim()));
+  // 1) Fetch ARENA_WEEKLY
+  const rowsAll = await fetchCsv<ArenaWeeklyRow>(responsesUrl);
 
-  // Tentukan minggu aktif
-  let effectiveWeek = week;
-  if (!effectiveWeek) {
-    const weeks = rows.map((r) => (r.Week_ID || "").trim()).filter(Boolean);
-    effectiveWeek = weeks.sort().at(-1) || "";
-  }
+  // 2) Leaderboard: only submitted TRUE
+  const submittedRows = rowsAll
+    .map((r) => ({
+      name: String(r.employee_name ?? "").trim(),
+      submitted: isTrueLike(r.submitted),
+      pagesAdded: toInt(r.pages_added),
+      finishBonus: toInt(r.finish_bonus),
+      streakBonus: toInt(r.streak_bonus),
+      weeklyScore: toInt(r.weekly_score),
+      booksFinishedWeek: toInt(r.books_finished_week),
+      finishedTotal: toInt(r.finished_total),
+      sheetRank: toInt(r.rank),
+    }))
+    .filter((r) => r.name);
 
-  const rowsThisWeek = effectiveWeek
-    ? rows.filter((r) => (r.Week_ID || "").trim() === effectiveWeek)
-    : rows;
+  const playersRaw = submittedRows.filter((r) => r.submitted);
 
-  // Latest submission per nama (kalau submit lebih dari sekali)
-  const latestByName = new Map<string, Row>();
-  for (const r of rowsThisWeek) {
-    const name = (r.Nama || "").trim();
-    const ts = new Date(String(r.Timestamp || "")).getTime() || 0;
-    const prev = latestByName.get(name);
-    const prevTs = prev ? new Date(String(prev.Timestamp || "")).getTime() || 0 : -1;
-    if (!prev || ts >= prevTs) latestByName.set(name, r);
-  }
+  // Sorting:
+  // - Utama: weeklyScore (yang kamu sudah set bobot books_finished_week besar di sheet)
+  // - Tie-break tambahan: booksFinishedWeek, pagesAdded, lalu nama
+  playersRaw.sort(
+    (a, b) =>
+      b.weeklyScore - a.weeklyScore ||
+      b.booksFinishedWeek - a.booksFinishedWeek ||
+      b.pagesAdded - a.pagesAdded ||
+      a.name.localeCompare(b.name)
+  );
 
-  // Leaderboard
-  const players = Array.from(latestByName.entries()).map(([name, r]) => {
-    const pages = toInt(r["Progres Terakhir (Angka Halaman)"]);
-    const status = (r["Status Buku"] || "").trim();
-    const finishBonus = status === "Sudah Selesai" ? 150 : 0;
-    const streakBonus = 20; // sementara
-    const weeklyScore = pages + finishBonus + streakBonus;
+  const ranked = playersRaw.map((p, i) => ({
+    rank: i + 1,
+    name: p.name,
+    weeklyScore: p.weeklyScore,
 
-    return {
-      name,
-      bookTitle: (r["Judul Buku yang Sedang Dibaca"] || "").trim(),
-      pages,
-      status,
-      finishBonus,
-      streakBonus,
-      weeklyScore,
-      timestamp: r.Timestamp || "",
-      week: effectiveWeek,
-    };
-  });
+    // pages sekarang berarti pages_added (tie-break)
+    pages: p.pagesAdded,
+    totalPages: 0,
 
-  players.sort((a, b) => b.weeklyScore - a.weeklyScore || a.name.localeCompare(b.name));
-  const ranked = players.map((p, i) => ({ ...p, rank: i + 1 }));
+    // info utama kompetisi
+    booksFinishedWeek: p.booksFinishedWeek,
+    finishedTotal: p.finishedTotal,
 
-  // Missed list (ambil dari Employees aktif)
+    finishBonus: p.finishBonus,
+    streakBonus: p.streakBonus,
+
+    // optional debug
+    sheetRank: p.sheetRank || null,
+
+    week: effectiveWeek,
+  }));
+
+  // 3) Missed list (ambil dari Employees aktif)
   const employees = await fetchCsv<EmployeeRow>(employeesUrl);
   const activeEmployees = employees
     .map((e) => ({
@@ -108,26 +138,24 @@ export async function GET(req: Request) {
     .filter((name) => !submittedSet.has(name))
     .sort((a, b) => a.localeCompare(b));
 
-  const latestFinish = ranked
-    .filter(p => p.status === "Sudah Selesai")
-    .sort((a, b) => {
-        const ta = new Date(a.timestamp).getTime() || 0;
-        const tb = new Date(b.timestamp).getTime() || 0;
-        return tb - ta;
-    })[0] || null;
+  // 4) “latestFinish” tidak bisa dihitung dari ARENA_WEEKLY karena tidak ada timestamp submit.
+  // Kamu bisa ganti jadi “newFinishers” berdasarkan booksFinishedWeek > 0.
+  const newFinishers = ranked
+    .filter((p) => (p.booksFinishedWeek ?? 0) > 0)
+    .map((p) => p.name);
 
-
-    return Response.json({
+  return Response.json({
     week: effectiveWeek,
     updatedAt: new Date().toISOString(),
     totals: {
-        totalEmployees: activeEmployees.length,
-        submitted: ranked.length,
-        missed: missed.length,
+      totalEmployees: activeEmployees.length,
+      submitted: ranked.length,
+      missed: missed.length,
     },
     leaderboard: ranked,
     missed,
-    latestFinish, // 👈 TAMBAHKAN INI
-    });
 
+    // info tambahan (opsional)
+    newFinishers,
+  });
 }

@@ -8,10 +8,19 @@ type Player = {
   name: string;
   weeklyScore: number;
 
-  pagesAdded?: number;
+  // pages sekarang = pages_added (tie-break)
+  pages?: number;
+  totalPages?: number;
+
   finishBonus?: number;
   streakBonus?: number;
-  status?: "Masih Dibaca" | "Sudah Selesai";
+
+  // NEW: aturan menang berdasarkan buku selesai
+  booksFinishedWeek?: number; // jumlah buku selesai minggu ini (delta)
+  finishedTotal?: number; // total buku selesai (YTD)
+
+  // optional debug (kalau API ngirim)
+  sheetRank?: number | null;
 };
 
 type ArenaResponse = {
@@ -20,7 +29,9 @@ type ArenaResponse = {
   leaderboard: Player[];
   missed: string[];
   totals?: { totalEmployees: number; submitted: number; missed: number };
-  latestFinish?: { name: string; bookTitle: string } | null;
+
+  // NEW: pengganti latestFinish
+  newFinishers?: string[];
 };
 
 function initials(name: string) {
@@ -117,6 +128,8 @@ export default function LeaderboardDisplay() {
   const top2 = top3[1];
   const top3p = top3[2];
 
+  const newFinishers = (data.newFinishers ?? []).filter(Boolean);
+
   return (
     <main className="min-h-screen bg-[#F7F1E6] text-slate-900">
       <div className="mx-auto max-w-md px-4 pt-6 pb-10">
@@ -128,10 +141,17 @@ export default function LeaderboardDisplay() {
 
           <div className="flex-1">
             <div className="text-lg font-semibold">BALANCIA BOOK ARENA</div>
-            <div className="text-xs text-slate-500">
+
+            {/* NEW SLOGAN */}
+            <div className="text-[11px] italic text-emerald-700/80 tracking-wide">
+              Memayu Hayuning Pribadi, Salam Literasi!
+            </div>
+
+            <div className="text-xs text-slate-500 mt-1">
               {data.week} · Auto refresh 15s
             </div>
           </div>
+
 
           {data.totals && (
             <div className="text-right">
@@ -143,18 +163,31 @@ export default function LeaderboardDisplay() {
           )}
         </div>
 
-        {/* Finish alert (optional dramatis) */}
-        {data.latestFinish && (
+        {/* Finish alert (NEW) */}
+        {newFinishers.length > 0 && (
           <div className="mt-4 rounded-[22px] bg-emerald-500/15 p-4 ring-1 ring-emerald-500/25">
             <div className="text-xs font-semibold text-emerald-900">
               🎉 FINISH ALERT
             </div>
             <div className="mt-1 text-sm">
-              <span className="font-semibold">{data.latestFinish.name}</span>{" "}
-              finished
+              {newFinishers.length === 1 ? (
+                <>
+                  <span className="font-semibold">{newFinishers[0]}</span>{" "}
+                  finished a book this week
+                </>
+              ) : (
+                <>
+                  <span className="font-semibold">{newFinishers.length}</span>{" "}
+                  people finished a book this week
+                </>
+              )}
             </div>
             <div className="text-[11px] text-emerald-900/70 line-clamp-1">
-              “{data.latestFinish.bookTitle}”
+              {newFinishers.length === 1
+                ? "Keep going, next finish is yours."
+                : `Top names: ${newFinishers.slice(0, 3).join(", ")}${
+                    newFinishers.length > 3 ? "…" : ""
+                  }`}
             </div>
           </div>
         )}
@@ -164,11 +197,7 @@ export default function LeaderboardDisplay() {
           <div className="grid grid-cols-3 items-end gap-3">
             {/* #3 */}
             <div className="flex flex-col items-center">
-              <Avatar
-                name={top3p?.name ?? "—"}
-                size={56}
-                ringClassName="ring-2 ring-white"
-              />
+              <Avatar name={top3p?.name ?? "—"} size={56} />
               <div className="mt-2 text-[11px] font-semibold text-center leading-tight line-clamp-2">
                 {top3p?.name ?? "—"}
               </div>
@@ -187,11 +216,7 @@ export default function LeaderboardDisplay() {
 
             {/* #2 */}
             <div className="flex flex-col items-center">
-              <Avatar
-                name={top2?.name ?? "—"}
-                size={56}
-                ringClassName="ring-2 ring-white"
-              />
+              <Avatar name={top2?.name ?? "—"} size={56} />
               <div className="mt-2 text-[11px] font-semibold text-center leading-tight line-clamp-2">
                 {top2?.name ?? "—"}
               </div>
@@ -210,11 +235,7 @@ export default function LeaderboardDisplay() {
 
             {/* #1 */}
             <div className="flex flex-col items-center">
-              <Avatar
-                name={top1?.name ?? "—"}
-                size={64}
-                ringClassName="ring-2 ring-white"
-              />
+              <Avatar name={top1?.name ?? "—"} size={64} />
               <div className="mt-2 text-[11px] font-semibold text-center leading-tight line-clamp-2">
                 {top1?.name ?? "—"}
               </div>
@@ -244,14 +265,20 @@ export default function LeaderboardDisplay() {
                 {String(p.rank).padStart(2, "0")}
               </div>
 
-              <Avatar name={p.name} size={44} ringClassName="ring-1 ring-black/5" />
+              <Avatar
+                name={p.name}
+                size={44}
+                ringClassName="ring-1 ring-black/5"
+              />
 
               <div className="flex-1">
                 <div className="text-sm font-semibold leading-tight">{p.name}</div>
                 <div className="text-[11px] text-slate-500">
                   {p.weeklyScore} points
-                  {typeof p.pagesAdded === "number" ? ` · Pages ${p.pagesAdded}` : ""}
-                  {(p.finishBonus ?? 0) > 0 ? " · FINISH" : ""}
+                  {typeof p.booksFinishedWeek === "number"
+                    ? ` · Books +${p.booksFinishedWeek}`
+                    : ""}
+                  {typeof p.pages === "number" ? ` · Pages +${p.pages}` : ""}
                 </div>
               </div>
 
@@ -275,7 +302,9 @@ export default function LeaderboardDisplay() {
               <div className="text-sm font-semibold text-slate-800">
                 Belum Check-in
               </div>
-              <div className="text-xs text-slate-500">{data.missed.length} missed</div>
+              <div className="text-xs text-slate-500">
+                {data.missed.length} missed
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {data.missed.map((n) => (
